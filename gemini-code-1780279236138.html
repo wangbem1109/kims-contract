@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>킴스학원 전자 근로계약서</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;700&display=swap');
+        body { font-family: 'Noto Sans KR', sans-serif; background-color: #f3f4f6; }
+        
+        .lock-scroll { overflow: hidden; touch-action: none; }
+        
+        @media print { 
+            body { background-color: white; }
+            .print-hidden { display: none !important; }
+            .max-w-2xl { max-width: 100%; box-shadow: none; margin: 0; padding: 0; border: none; }
+            @page { margin: 15mm; }
+        }
+        .animate-fade-in { animation: fadeIn 0.3s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // ==========================================
+        // ⚙️ 필수 설정 구간
+        // ==========================================
+        const GOOGLE_SHEET_WEBHOOK_URL = "https://script.google.com/macros/s/AKfycbxBfW1iZccgkK2fMT0JH7QK7ZOKSGD-PTORlBsinVaI-qbXwFuzMVkQ9PVFRuhiUkpE/exec";
+        
+        const myFirebaseConfig = {
+            apiKey: "AIzaSyDpLOAr9MqmwH4JSQUn9fMbemVn-wFraMU",
+            authDomain: "kims-contract.firebaseapp.com",
+            projectId: "kims-contract",
+            storageBucket: "kims-contract.firebasestorage.app",
+            messagingSenderId: "283217438070",
+            appId: "1:283217438070:web:53be264b949bd769804657"
+        };
+
+        let app, auth, db;
+        const isCanvas = typeof __firebase_config !== 'undefined';
+        const canvasAppId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        try {
+            if (isCanvas) {
+                app = firebase.initializeApp(JSON.parse(__firebase_config));
+                auth = firebase.auth();
+                db = firebase.firestore();
+            } else if (myFirebaseConfig.apiKey) {
+                app = firebase.initializeApp(myFirebaseConfig);
+                auth = firebase.auth();
+                db = firebase.firestore();
+            }
+        } catch (e) {
+            console.error("Firebase 초기화 에러:", e);
+        }
+
+        // ==========================================
+        // 🚀 메인 앱 컴포넌트
+        // ==========================================
+        function App() {
+            if (!db) {
+                return (
+                    <div className="flex h-screen items-center justify-center p-6 text-center">
+                        <div className="bg-white p-8 rounded-xl shadow-lg max-w-md w-full border-t-4 border-red-500 animate-fade-in">
+                            <h1 className="text-2xl font-bold text-gray-800 mb-4">⚠️ 데이터베이스 설정 필요</h1>
+                            <p className="text-gray-600 mb-6 text-sm">index.html 파일 내의 myFirebaseConfig를 채워주세요.</p>
+                        </div>
+                    </div>
+                );
+            }
+
+            const [loading, setLoading] = useState(true);
+            const [currentView, setCurrentView] = useState('loading'); 
+            const [contractId, setContractId] = useState(null);
+            const [contractData, setContractData] = useState(null);
+            const [copySuccess, setCopySuccess] = useState(false);
+            const [traceText, setTraceText] = useState('');
+            
+            const [capturedImage, setCapturedImage] = useState(null);
+            const [isCapturing, setIsCapturing] = useState(false);
+            
+            const [adminPassword, setAdminPassword] = useState(localStorage.getItem('kims_admin_pw') || '1234');
+            const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(localStorage.getItem('kims_admin_auth') === 'true');
+
+            const [teacherInfo, setTeacherInfo] = useState({ address: '', idNumber: '', bankAccount: '' });
+
+            const [formData, setFormData] = useState({
+                employeeName: '', subject: '영어', workDays: '주5회', startTime: '2시', endTime: '7시',
+                hourlyRate: '12,000', holidayHourlyRate: '13,000', employerName: '김원근', employerPhone: '010-2605-2656',
+                teacherPassword: '', 
+            });
+
+            const REQUIRED_TRACE_TEXT = "확인함";
+
+            // 관리자 비밀번호 분실 시 초기화 함수
+            const handleResetAdminPassword = () => {
+                const answer = prompt("비밀번호를 초기화하려면 '킴스학원'을 정확히 입력해주세요.");
+                if (answer === '킴스학원') {
+                    localStorage.setItem('kims_admin_pw', '1234');
+                    setAdminPassword('1234');
+                    alert("비밀번호가 기본값인 '1234'로 초기화되었습니다.");
+                } else if (answer !== null) {
+                    alert("입력값이 일치하지 않아 초기화가 취소되었습니다.");
+                }
+            };
+
+            useEffect(() => {
+                const init = async () => {
+                    try {
+                        if (isCanvas && typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            await auth.signInWithCustomToken(__initial_auth_token);
+                        } else {
+                            await auth.signInAnonymously();
+                        }
+                        
+                        const urlParams = new URLSearchParams(window.location.search);
+                        const id = urlParams.get('id');
+                        
+                        if (id) {
+                            setContractId(id);
+                            await loadContract(id);
+                        } else {
+                            setCurrentView('create');
+                            setLoading(false);
+                        }
+                    } catch (error) {
+                        console.error("Auth error", error);
+                        setLoading(false);
+                    }
+                };
+                init();
+            }, []);
+
+            const loadContract = async (id) => {
+                setLoading(true);
+                try {
+                    const docRef = isCanvas
+                        ? db.collection('artifacts').doc(canvasAppId).collection('public').doc('data').collection('contracts').doc(id)
+                        : db.collection('contracts').doc(id);
+                        
+                    const docSnap = await docRef.get();
+                    
+                    if (docSnap.exists) {
+                        const data = docSnap.data();
+                        setContractData(data);
+                        if (data.status === 'signed') setCurrentView('complete');
+                        else setCurrentView('teacherLogin'); 
+                    } else {
+                        alert("계약서를 찾을 수 없습니다.");
+                        setCurrentView('create');
+                    }
+                } catch (err) {
+                    console.error(err);
+                    alert("계약서를 불러오는 중 오류가 발생했습니다.");
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const handleCreateContract = async (customHtml) => {
+                if (!formData.employeeName) return alert("강사 이름을 입력해주세요.");
+                if (!formData.teacherPassword) return alert("강사 비밀번호를 설정해주세요.");
+                
+                setLoading(true);
+                try {
+                    const newId = Date.now().toString() + Math.random().toString(36).substring(2, 5);
+                    const newContract = {
+                        ...formData,
+                        customHtml: customHtml || null,
+                        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+                        status: 'pending',
+                        employerAddress: '광산구 도산로 4-3 2층 킴스학원'
+                    };
+                    
+                    const docRef = isCanvas
+                        ? db.collection('artifacts').doc(canvasAppId).collection('public').doc('data').collection('contracts').doc(newId)
+                        : db.collection('contracts').doc(newId);
+                        
+                    await docRef.set(newContract);
+                    setContractId(newId);
+                    setContractData(newContract);
+                    setCurrentView('share');
+
+                    if (GOOGLE_SHEET_WEBHOOK_URL) {
+                        fetch(GOOGLE_SHEET_WEBHOOK_URL, {
+                            method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain' },
+                            body: JSON.stringify({ ...newContract, contractId: newId, statusStr: '발송됨' })
+                        }).catch(e => console.error(e));
+                    }
+                } catch (err) {
+                    console.error(err);
+                    alert("계약서 생성에 실패했습니다.");
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const handleSubmitSignature = async (sigData) => {
+                setLoading(true);
+                try {
+                    const docRef = isCanvas
+                        ? db.collection('artifacts').doc(canvasAppId).collection('public').doc('data').collection('contracts').doc(contractId)
+                        : db.collection('contracts').doc(contractId);
+                        
+                    await docRef.update({
+                        status: 'signed',
+                        signatureData: sigData,
+                        teacherAddress: teacherInfo.address,
+                        teacherIdNumber: teacherInfo.idNumber,
+                        teacherBankAccount: teacherInfo.bankAccount,
+                        signedAt: firebase.firestore.FieldValue.serverTimestamp()
+                    });
+                    
+                    const updatedContract = { 
+                        ...contractData, 
+                        status: 'signed', 
+                        signatureData: sigData, 
+                        teacherAddress: teacherInfo.address,
+                        teacherIdNumber: teacherInfo.idNumber,
+                        teacherBankAccount: teacherInfo.bankAccount,
+                        signedAt: new Date() 
+                    };
+                    setContractData(updatedContract);
+                    setCurrentView('complete');
+
+                    if (GOOGLE_SHEET_WEBHOOK_URL) {
+                        fetch(GOOGLE_SHEET_WEBHOOK_URL, {
+                            method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain' },
+                            body: JSON.stringify({ ...updatedContract, contractId: contractId, statusStr: '서명 완료됨' })
+                        }).catch(e => console.error(e));
+                    }
+                } catch (err) {
+                    alert("서명 저장에 실패했습니다.");
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const handleCopyLink = () => {
+                const url = `${window.location.origin}${window.location.pathname}?id=${contractId}`;
+                const textArea = document.createElement("textarea");
+                textArea.value = url; textArea.style.position = "fixed"; textArea.style.opacity = "0";
+                document.body.appendChild(textArea);
+                textArea.focus(); textArea.select();
+                try { document.execCommand('copy'); setCopySuccess(true); setTimeout(() => setCopySuccess(false), 2000); } 
+                catch (err) { alert("링크 복사 실패. 수동으로 복사해주세요.\n" + url); } 
+                finally { document.body.removeChild(textArea); }
+            };
+
+            const handleSaveAsImage = async () => {
+                setIsCapturing(true);
+                const element = document.getElementById('contract-paper');
+                if (typeof window.html2canvas !== 'undefined' && element) {
+                    try {
+                        const canvas = await window.html2canvas(element, {
+                            scale: 2, 
+                            useCORS: true,
+                            backgroundColor: '#ffffff'
+                        });
+                        const imgData = canvas.toDataURL('image/png');
+                        setCapturedImage(imgData);
+                    } catch (error) {
+                        alert('이미지 생성 중 오류가 발생했습니다.');
+                        console.error(error);
+                    }
+                } else {
+                    alert('사진 저장 기능을 불러오지 못했습니다.');
+                }
+                setIsCapturing(false);
+            };
+
+            if (loading || currentView === 'loading') return <div className="flex h-screen items-center justify-center"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div></div>;
+
+            return (
+                <div className="max-w-2xl mx-auto bg-white min-h-screen shadow-md relative border-x border-gray-200">
+                    <header className="bg-blue-600 text-white p-4 shadow-sm print-hidden sticky top-0 z-10 flex justify-between items-center">
+                        <h1 className="text-xl font-bold">📄 킴스학원 전자 근로계약</h1>
+                        {currentView === 'complete' && <span className="text-xs bg-green-500 text-white px-2 py-1 rounded-full font-bold">수정불가 (잠금됨)</span>}
+                    </header>
+                    <main className="p-4 sm:p-6 pb-24 relative">
+                        
+                        {currentView === 'create' && !isAdminAuthenticated && (
+                            <AdminLoginView adminPassword={adminPassword} onLogin={() => setIsAdminAuthenticated(true)} onReset={handleResetAdminPassword} />
+                        )}
+
+                        {currentView === 'create' && isAdminAuthenticated && (
+                            <CreateView formData={formData} setFormData={setFormData} onSubmit={handleCreateContract} adminPassword={adminPassword} setAdminPassword={setAdminPassword} />
+                        )}
+                        
+                        {currentView === 'share' && (
+                            <ShareView onCopy={handleCopyLink} copySuccess={copySuccess} contractId={contractId} teacherPassword={formData.teacherPassword} onTestTeacherView={() => loadContract(contractId)} />
+                        )}
+
+                        {currentView === 'teacherLogin' && (
+                            <TeacherLoginView contractData={contractData} onSuccess={() => setCurrentView(contractData.status === 'signed' ? 'complete' : 'review')} />
+                        )}
+
+                        {currentView === 'review' && (
+                            <div className="animate-fade-in">
+                                <div className="mb-6 p-4 bg-blue-50 text-blue-800 rounded-lg border border-blue-200">
+                                    <h3 className="font-bold">💡 계약 내용 확인</h3>
+                                    <p className="text-sm mt-1">원장님이 보내신 근로계약서입니다. 내용을 꼼꼼히 확인하신 후 하단의 버튼을 눌러주세요.</p>
+                                </div>
+                                <div className="border border-gray-300 p-6 rounded-lg shadow-sm mb-6 bg-white overflow-x-auto">
+                                    <ContractDocument data={contractData} isEditable={false} />
+                                </div>
+                                <button onClick={() => setCurrentView('teacherInfoInput')} className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-xl text-lg shadow-md">
+                                    확인했습니다 (다음 단계) ▶️
+                                </button>
+                            </div>
+                        )}
+
+                        {currentView === 'teacherInfoInput' && (
+                            <TeacherInfoView info={teacherInfo} setInfo={setTeacherInfo} onNext={() => setCurrentView('trace')} />
+                        )}
+
+                        {currentView === 'trace' && (
+                            <div className="animate-fade-in">
+                                <div className="mb-6 p-4 bg-amber-50 text-amber-800 rounded-lg border border-amber-200">
+                                    <h3 className="font-bold">✍️ 동의 문구 입력</h3>
+                                    <p className="text-sm mt-1">계약 내용 확인을 위해 아래 문구를 똑같이 적어주세요.</p>
+                                </div>
+                                <div className="bg-gray-50 p-6 rounded-xl border border-gray-200 mb-6 text-center shadow-inner">
+                                    <p className="text-gray-500 mb-2 text-sm">아래 문구를 입력하세요</p>
+                                    <p className="text-xl font-bold text-gray-800 mb-6 select-none bg-blue-100 inline-block px-4 py-2 rounded-lg tracking-widest">{REQUIRED_TRACE_TEXT}</p>
+                                    <input type="text" value={traceText} onChange={(e) => setTraceText(e.target.value)} placeholder="여기에 입력" className="w-full text-center p-4 border-2 rounded-xl border-gray-300 focus:border-blue-500 outline-none text-lg font-bold" />
+                                </div>
+                                <button onClick={() => setCurrentView('sign')} disabled={traceText !== REQUIRED_TRACE_TEXT} className={`w-full font-bold py-4 rounded-xl text-lg shadow-md transition-all ${traceText === REQUIRED_TRACE_TEXT ? 'bg-blue-600 text-white transform scale-100' : 'bg-gray-300 text-gray-500 transform scale-95'}`}>
+                                    서명하기 ▶️
+                                </button>
+                            </div>
+                        )}
+
+                        {currentView === 'sign' && (
+                            <div className="animate-fade-in">
+                                <div className="mb-6 p-4 bg-indigo-50 text-indigo-800 rounded-lg border border-indigo-200">
+                                    <h3 className="font-bold">✍️ 전자 서명</h3>
+                                    <p className="text-sm mt-1">아래 네모 칸 안에 손가락으로 자연스럽게 서명해주세요.</p>
+                                </div>
+                                <SignaturePad onSave={handleSubmitSignature} onCancel={() => setCurrentView('trace')} />
+                            </div>
+                        )}
+
+                        {currentView === 'complete' && (
+                            <div className="animate-fade-in">
+                                <div className="print-hidden mb-6 p-6 bg-green-50 border-2 border-green-500 rounded-xl text-center shadow-sm">
+                                    <div className="text-5xl mb-3">✅</div>
+                                    <h2 className="text-2xl font-bold text-green-800 mb-2">계약이 체결되었습니다!</h2>
+                                    <p className="text-sm text-green-700">이 문서는 최종 서명되어 안전하게 잠금(수정 불가) 처리되었습니다.</p>
+                                    <p className="text-xs text-gray-500 mt-2">※ 접속하신 이 링크 주소 자체가 원본 계약서입니다.</p>
+                                    
+                                    <div className="flex flex-col sm:flex-row gap-3 justify-center mt-6">
+                                        <button onClick={handleSaveAsImage} disabled={isCapturing} className="bg-blue-600 border-2 border-blue-700 text-white font-bold py-3 px-6 rounded-full hover:bg-blue-700 transition-colors flex items-center justify-center gap-2">
+                                            {isCapturing ? '처리 중...' : '📸 사진첩에 이미지로 저장'}
+                                        </button>
+                                        <button onClick={() => window.print()} className="bg-white border-2 border-gray-300 text-gray-700 font-bold py-3 px-6 rounded-full hover:bg-gray-100 transition-colors">
+                                            🖨️ 인쇄하기 (PC권장)
+                                        </button>
+                                    </div>
+                                </div>
+                                <div className="border border-gray-300 bg-white p-2 sm:p-8 rounded-lg print:border-none print:p-0 relative overflow-hidden" id="contract-paper">
+                                    <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-9xl text-gray-100 opacity-50 pointer-events-none select-none z-0 print-hidden font-bold transform -rotate-45">완료됨</div>
+                                    <div className="relative z-10">
+                                        <ContractDocument data={contractData} isComplete={true} isEditable={false} />
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                        
+                        {capturedImage && (
+                            <div className="fixed inset-0 bg-black bg-opacity-90 z-50 flex flex-col items-center justify-center p-4 animate-fade-in">
+                                <div className="text-white text-center mb-4">
+                                    <h3 className="text-xl font-bold text-yellow-400 mb-2">저장 방법 안내</h3>
+                                    <p>아래 <b>계약서 이미지를 길게 누르면</b></p>
+                                    <p>'사진 앱에 저장' 메뉴가 뜹니다.</p>
+                                </div>
+                                <div className="overflow-auto max-h-[60vh] border-4 border-gray-700 rounded-lg bg-white w-full max-w-md">
+                                    <img src={capturedImage} alt="계약서 이미지본" className="w-full" />
+                                </div>
+                                <button onClick={() => setCapturedImage(null)} className="mt-6 bg-white text-black font-bold py-3 px-8 rounded-full shadow-lg">
+                                    닫기
+                                </button>
+                            </div>
+                        )}
+                    </main>
+                </div>
+            );
+        }
+
+        // --- 서브 컴포넌트들 ---
+        function AdminLoginView({ adminPassword, onLogin, onReset }) {
+            const [pw, setPw] = useState('');
+            return (
+                <div className="text-center py-12 animate-fade-in">
+                    <div className="text-5xl mb-4">🔐</div>
+                    <h2 className="text-2xl font-bold mb-2">관리자 인증</h2>
+                    <p className="text-gray-500 text-sm mb-8">계약서를 생성하려면 비밀번호를 입력해주세요.</p>
+                    <input 
+                        type="password" 
+                        value={pw} 
+                        onChange={e => setPw(e.target.value)} 
+                        onKeyDown={e => e.key === 'Enter' && (pw === adminPassword ? onLogin() : alert('비밀번호가 일치하지 않습니다.'))}
+                        placeholder="비밀번호" 
+                        maxLength={10} 
+                        className="w-full max-w-xs text-center p-4 border-2 rounded-xl mb-4 outline-none text-2xl tracking-widest font-bold" 
+                    />
+                    <button onClick={() => pw === adminPassword ? onLogin() : alert('비밀번호가 일치하지 않습니다.')} className="w-full max-w-xs bg-gray-800 text-white font-bold py-4 rounded-xl shadow-lg mb-6 hover:bg-gray-900 transition-colors">
+                        확인
+                    </button>
+                    <div>
+                        <button onClick={onReset} className="text-sm text-gray-500 underline hover:text-gray-800 transition-colors">
+                            비밀번호를 잊으셨나요?
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+
+        function TeacherLoginView({ contractData, onSuccess }) {
+            const [pw, setPw] = useState('');
+            return (
+                <div className="text-center py-12 animate-fade-in">
+                    <div className="text-5xl mb-4">🔐</div>
+                    <h2 className="text-2xl font-bold mb-2">본인 확인</h2>
+                    <p className="text-gray-500 text-sm mb-8"><b className="text-indigo-600">{contractData.employeeName}</b> 강사님, 전달받은 비밀번호를 입력해주세요.</p>
+                    <input type="password" value={pw} onChange={e => setPw(e.target.value)} placeholder="비밀번호 입력" maxLength={4} className="w-full max-w-xs text-center p-4 border-2 rounded-xl mb-4 outline-none text-2xl tracking-widest font-bold" />
+                    <button onClick={() => pw === contractData.teacherPassword ? onSuccess() : alert('비밀번호가 일치하지 않습니다.')} className="w-full max-w-xs bg-indigo-600 text-white font-bold py-4 rounded-xl shadow-lg">문서 열람하기</button>
+                </div>
+            );
+        }
+
+        function TeacherInfoView({ info, setInfo, onNext }) {
+            const isValid = info.address.trim() !== '' && info.idNumber.trim() !== '' && info.bankAccount.trim() !== '';
+            return (
+                <div className="animate-fade-in">
+                    <div className="mb-6 p-4 bg-blue-50 text-blue-800 rounded-lg border border-blue-200">
+                        <h3 className="font-bold">👤 강사 필수 정보 입력</h3>
+                        <p className="text-sm mt-1">계약서에 기재될 필수 정보를 정확하게 입력해주세요. (입력하신 정보는 안전하게 보관됩니다.)</p>
+                    </div>
+                    <div className="bg-white p-6 rounded-xl border border-gray-200 mb-6 space-y-5 shadow-sm">
+                        <div>
+                            <label className="block text-sm font-bold text-gray-700 mb-2">주민등록번호</label>
+                            <input type="text" value={info.idNumber} onChange={e => setInfo({...info, idNumber: e.target.value})} placeholder="예: 900101-1234567" className="w-full p-3 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500" />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-bold text-gray-700 mb-2">현재 거주지 주소</label>
+                            <input type="text" value={info.address} onChange={e => setInfo({...info, address: e.target.value})} placeholder="예: 서울시 강남구 테헤란로 123, 101동 101호" className="w-full p-3 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500" />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-bold text-gray-700 mb-2">급여 수령 계좌번호</label>
+                            <input type="text" value={info.bankAccount} onChange={e => setInfo({...info, bankAccount: e.target.value})} placeholder="예: 국민은행 123456-01-123456" className="w-full p-3 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500" />
+                        </div>
+                    </div>
+                    <button onClick={onNext} disabled={!isValid} className={`w-full font-bold py-4 rounded-xl text-lg shadow-md transition-all ${isValid ? 'bg-blue-600 text-white transform scale-100' : 'bg-gray-300 text-gray-500 transform scale-95'}`}>
+                        입력 완료 (다음 단계) ▶️
+                    </button>
+                </div>
+            );
+        }
+
+        function CreateView({ formData, setFormData, onSubmit, adminPassword, setAdminPassword }) {
+            const previewRef = useRef(null);
+            const [showPwSetting, setShowPwSetting] = useState(false);
+            const [newPw, setNewPw] = useState('');
+
+            const handleChange = (e) => setFormData(prev => ({ ...prev, [e.target.name]: e.target.value }));
+            
+            const handleSavePw = () => {
+                if(newPw.length < 4) return alert("비밀번호는 4자리 이상 입력해주세요.");
+                localStorage.setItem('kims_admin_pw', newPw);
+                localStorage.setItem('kims_admin_auth', 'false');
+                setAdminPassword(newPw);
+                alert("관리자 비밀번호가 성공적으로 변경되었습니다. 다시 로그인 해주세요.");
+                window.location.reload();
+            };
+
+            return (
+                <div className="space-y-6 animate-fade-in">
+                    <div className="flex justify-between items-start">
+                        <div>
+                            <h2 className="text-2xl font-bold mb-1">새 근로계약서 작성</h2>
+                            <p className="text-gray-500 text-sm">빈칸을 채우고 링크를 생성하세요.</p>
+                        </div>
+                        <button onClick={() => setShowPwSetting(!showPwSetting)} className="bg-gray-100 text-gray-700 px-3 py-2 rounded-lg text-sm font-bold hover:bg-gray-200 shadow-sm border border-gray-300">
+                            ⚙️ 비밀번호 변경
+                        </button>
+                    </div>
+
+                    {showPwSetting && (
+                        <div className="bg-gray-800 text-white p-4 rounded-xl mb-4 animate-fade-in shadow-lg">
+                            <h3 className="font-bold mb-3 text-sm text-gray-300">새로운 관리자 비밀번호 입력</h3>
+                            <div className="flex gap-2">
+                                <input type="password" value={newPw} onChange={e => setNewPw(e.target.value)} placeholder="새 비밀번호 (4자리 이상)" className="flex-1 p-3 rounded-lg text-black outline-none font-bold tracking-widest" />
+                                <button onClick={handleSavePw} className="bg-blue-600 px-6 py-3 rounded-lg font-bold hover:bg-blue-700 transition-colors">저장</button>
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm space-y-4">
+                        <div>
+                            <label className="block text-sm font-bold text-gray-700 mb-1">강사 성명 (계약자)</label>
+                            <input type="text" name="employeeName" value={formData.employeeName} onChange={handleChange} className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none" />
+                        </div>
+                        <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
+                            <label className="block text-sm font-bold text-blue-800 mb-1">🔒 강사 본인인증 비밀번호 설정</label>
+                            <input type="text" name="teacherPassword" value={formData.teacherPassword} onChange={handleChange} placeholder="휴대폰 뒷자리 4자리 추천" maxLength={4} className="w-full p-3 border border-blue-300 rounded-lg text-center font-bold tracking-widest outline-none focus:ring-2 focus:ring-blue-500" />
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                            <div><label className="block text-sm font-bold text-gray-700 mb-1">담당 과목</label><input type="text" name="subject" value={formData.subject} onChange={handleChange} className="w-full p-3 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500"/></div>
+                            <div><label className="block text-sm font-bold text-gray-700 mb-1">근무 일수</label><input type="text" name="workDays" value={formData.workDays} onChange={handleChange} className="w-full p-3 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500"/></div>
+                            <div><label className="block text-sm font-bold text-gray-700 mb-1">출근 시간</label><input type="text" name="startTime" value={formData.startTime} onChange={handleChange} className="w-full p-3 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500"/></div>
+                            <div><label className="block text-sm font-bold text-gray-700 mb-1">퇴근 시간</label><input type="text" name="endTime" value={formData.endTime} onChange={handleChange} className="w-full p-3 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500"/></div>
+                            <div><label className="block text-sm font-bold text-gray-700 mb-1">기본 시급</label><input type="text" name="hourlyRate" value={formData.hourlyRate} onChange={handleChange} className="w-full p-3 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500"/></div>
+                            <div><label className="block text-sm font-bold text-gray-700 mb-1">주휴수당 포함 시급</label><input type="text" name="holidayHourlyRate" value={formData.holidayHourlyRate} onChange={handleChange} className="w-full p-3 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500"/></div>
+                        </div>
+                    </div>
+                    
+                    <div className="mt-8 border-t-2 border-dashed border-gray-300 pt-6">
+                        <h3 className="text-lg font-bold mb-2 flex items-center gap-2"><span className="text-blue-600">📄</span> 실시간 계약서 미리보기</h3>
+                        <p className="text-xs text-red-500 font-bold mb-3">💡 텍스트를 클릭하면 직접 문구를 수정할 수 있습니다.</p>
+                        <div className="border border-gray-300 p-4 rounded-lg bg-white shadow-inner max-h-[60vh] overflow-y-auto">
+                            <ContractDocument data={{...formData, employeeName: formData.employeeName || '(강사 성명)'}} isEditable={true} previewRef={previewRef} />
+                        </div>
+                    </div>
+                    <button onClick={() => onSubmit(previewRef.current.innerHTML)} className="w-full bg-blue-600 text-white font-bold py-4 rounded-xl text-lg shadow-lg hover:bg-blue-700 transition-colors">
+                        🔗 계약서 생성 및 링크 만들기
+                    </button>
+                </div>
+            );
+        }
+
+        function ShareView({ onCopy, copySuccess, contractId, teacherPassword, onTestTeacherView }) {
+            const url = `${window.location.origin}${window.location.pathname}?id=${contractId}`;
+            return (
+                <div className="text-center py-6 animate-fade-in">
+                    <div className="text-6xl mb-4">✅</div>
+                    <h2 className="text-2xl font-bold mb-2 text-gray-800">계약서가 준비되었습니다!</h2>
+                    <div className="bg-amber-50 border border-amber-200 p-5 rounded-xl mb-6 shadow-sm">
+                        <p className="text-amber-800 font-bold text-lg">🔑 강사 비밀번호</p>
+                        <p className="text-3xl font-extrabold text-amber-600 mt-2 tracking-widest">{teacherPassword}</p>
+                    </div>
+                    <div className="bg-gray-100 p-4 rounded-lg mb-6 border border-gray-200"><input type="text" readOnly value={url} className="w-full bg-transparent outline-none text-sm text-gray-500 text-center" /></div>
+                    <button onClick={onCopy} className={`w-full font-bold py-4 rounded-xl mb-6 shadow-md transition-colors ${copySuccess ? 'bg-green-500 text-white' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}>
+                        {copySuccess ? '복사되었습니다!' : '📋 카톡 공유용 링크 복사하기'}
+                    </button>
+                    <button onClick={onTestTeacherView} className="w-full bg-gray-800 text-white font-bold py-3 rounded-lg text-sm hover:bg-gray-900 transition-colors">
+                        ↗️ 이 화면에서 강사 입장 테스트해보기
+                    </button>
+                </div>
+            );
+        }
+
+        function SignaturePad({ onSave, onCancel }) {
+            const canvasRef = useRef(null);
+            const [isDrawing, setIsDrawing] = useState(false);
+            const [hasDrawn, setHasDrawn] = useState(false);
+            
+            useEffect(() => {
+                const canvas = canvasRef.current;
+                canvas.width = canvas.parentElement.clientWidth; 
+                canvas.height = 250;
+                const ctx = canvas.getContext('2d');
+                ctx.lineWidth = 4; 
+                ctx.lineCap = 'round'; 
+                ctx.strokeStyle = '#000000';
+                ctx.fillStyle = '#ffffff'; 
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }, []);
+
+            const getCoordinates = (e) => {
+                const canvas = canvasRef.current;
+                const rect = canvas.getBoundingClientRect();
+                let clientX, clientY;
+                if (e.touches && e.touches.length > 0) { clientX = e.touches[0].clientX; clientY = e.touches[0].clientY; } 
+                else if (e.changedTouches && e.changedTouches.length > 0) { clientX = e.changedTouches[0].clientX; clientY = e.changedTouches[0].clientY; } 
+                else { clientX = e.clientX; clientY = e.clientY; }
+                return { x: clientX - rect.left, y: clientY - rect.top };
+            };
+
+            const startDrawing = (e) => { e.preventDefault(); setIsDrawing(true); const coords = getCoordinates(e); const ctx = canvasRef.current.getContext('2d'); ctx.beginPath(); ctx.moveTo(coords.x, coords.y); };
+            const draw = (e) => { e.preventDefault(); if (!isDrawing) return; const coords = getCoordinates(e); const ctx = canvasRef.current.getContext('2d'); ctx.lineTo(coords.x, coords.y); ctx.stroke(); setHasDrawn(true); };
+            const stopDrawing = (e) => { if(e) e.preventDefault(); if (isDrawing) { const ctx = canvasRef.current.getContext('2d'); ctx.closePath(); setIsDrawing(false); } };
+            const clearCanvas = () => { const canvas = canvasRef.current; canvas.getContext('2d').fillRect(0, 0, canvas.width, canvas.height); setHasDrawn(false); };
+
+            return (
+                <div>
+                    <div className="border-2 border-gray-400 rounded-xl overflow-hidden bg-white relative shadow-inner" style={{ touchAction: 'none' }}>
+                        <canvas ref={canvasRef} onMouseDown={startDrawing} onMouseMove={draw} onMouseUp={stopDrawing} onMouseLeave={stopDrawing} onTouchStart={startDrawing} onTouchMove={draw} onTouchEnd={stopDrawing} onTouchCancel={stopDrawing} className="w-full touch-none cursor-crosshair bg-white" />
+                        {!hasDrawn && <div className="absolute inset-0 pointer-events-none flex items-center justify-center text-gray-300 font-bold text-2xl select-none">여기에 서명하세요</div>}
+                    </div>
+                    <div className="flex justify-end mt-2"><button onClick={clearCanvas} className="text-gray-500 hover:text-red-500 font-bold underline text-sm px-2 py-1 transition-colors">지우고 다시 쓰기</button></div>
+                    <div className="flex gap-3 pt-4">
+                        <button onClick={onCancel} className="w-1/3 bg-gray-300 text-gray-700 font-bold py-4 rounded-xl shadow-sm">이전</button>
+                        <button onClick={() => hasDrawn && onSave(canvasRef.current.toDataURL('image/png'))} disabled={!hasDrawn} className={`w-2/3 font-bold py-4 rounded-xl shadow-md transition-colors ${hasDrawn ? 'bg-blue-600 text-white' : 'bg-gray-300 text-gray-500'}`}>✅ 서명 완료</button>
+                    </div>
+                </div>
+            );
+        }
+
+        function ContractDocument({ data, isComplete = false, isEditable = false, previewRef }) {
+            if (!data) return null;
+            const dateObj = data.signedAt && data.signedAt.toDate ? data.signedAt.toDate() : new Date();
+
+            return (
+                <div className="font-serif text-[15px] leading-relaxed text-gray-900 bg-white p-2 sm:p-4">
+                    <h1 className="text-3xl font-extrabold text-center mb-8 border-b-2 border-gray-800 pb-4">근로 계약서</h1>
+                    <p className="mb-6 indent-2"><strong>킴스학원</strong>(이하 “갑”)과 <strong>{data.employeeName}</strong>(이하 “을”)은 다음과 같이 강사채용 계약을 체결한다.</p>
+                    
+                    {data.customHtml ? (
+                        <div dangerouslySetInnerHTML={{ __html: data.customHtml }} className="space-y-6" />
+                    ) : (
+                        <div ref={previewRef} contentEditable={isEditable} suppressContentEditableWarning={true} className={`space-y-6 ${isEditable ? 'hover:bg-blue-50 p-3 rounded border border-dashed border-blue-200 focus:outline-none focus:ring-2 focus:ring-blue-400' : ''}`}>
+                            <section>
+                                <h2 className="font-bold bg-gray-100 inline-block px-2 rounded mb-2">제1조 [목적]</h2>
+                                <p className="pl-2">강사채용 계약을 체결함에 있어서, "본 계약”은 학원사업에 동참하는 학원과 강사의 전반적인 사항을 규정하여 건전한 사교육풍토의 조성과 아울러 공동의 이익과 발전에 기여함을 그 목적으로 한다.</p>
+                            </section>
+                            
+                            <section>
+                                <h2 className="font-bold bg-gray-100 inline-block px-2 rounded mb-2">제2조 [직위 및 담당과목]</h2>
+                                <ol className="list-decimal pl-6 space-y-1">
+                                    <li>직위: 강사</li>
+                                    <li>담당과목: <span className="font-bold underline">{data.subject}</span></li>
+                                </ol>
+                            </section>
+                            
+                            <section>
+                                <h2 className="font-bold bg-gray-100 inline-block px-2 rounded mb-2">제3조 [계약기간]</h2>
+                                <p className="pl-2">학사행정의 원칙과 안정을 위하여 1년을 원칙으로 한다.</p>
+                            </section>
+                            
+                            <section>
+                                <h2 className="font-bold bg-gray-100 inline-block px-2 rounded mb-2">제4조 [근무시간]</h2>
+                                <ol className="list-decimal pl-6 space-y-2">
+                                    <li>
+                                        근무시간: <span className="font-bold underline">{data.workDays}</span> 출근 <span className="font-bold underline">{data.startTime}</span> 부터 퇴근 <span className="font-bold underline">{data.endTime}</span> 까지 근무한다.<br/>
+                                        <span className="text-sm text-gray-600 block mt-1">※ 특별한 경우(학원행사, 홍보기간등) 토요근무가 추가될 수 있다. (단, 방학기간 중에는 근무시간의 변동이 있다.)</span>
+                                    </li>
+                                    <li>강사(능력급강사)는 강의시작 15분전까지 출근한다.</li>
+                                    <li>퇴근시간: 마지막 수업종료 후 출석부 및 각종일지를 작성하여 원장의 결재를 받은 후 퇴근</li>
+                                    <li className="text-red-600 font-bold list-none mt-2">*수습기간 2개월(업무능력 부족 등 사유로 해고 가능)</li>
+                                </ol>
+                            </section>
+                            
+                            <section>
+                                <h2 className="font-bold bg-gray-100 inline-block px-2 rounded mb-2">제5조 [급여]</h2>
+                                <p className="pl-2">
+                                    급여액은 <span className="font-bold text-red-600">주 15시간 미만 근무 시 시급 {data.hourlyRate}원</span>으로 한다. (3.3% 원천징수)<br/>
+                                    <span className="font-bold text-red-600">주 15시간 이상 근무 시, 주휴수당 포함 시급 {data.holidayHourlyRate}원</span>으로 한다.
+                                </p>
+                            </section>
+                            
+                            <section>
+                                <h2 className="font-bold bg-gray-100 inline-block px-2 rounded mb-2">제6조 [근무수칙]</h2>
+                                <p className="pl-2 mb-2">"을"은 킴스학원의 교직원으로서 품위유지와 함께 언행에 신중하며 모든 교직원은 동료애로써 서로를 아끼고, 화목한 분위기로 근무할 수 있도록 노력한다.</p>
+                                <ol className="list-decimal pl-6 space-y-1">
+                                    <li>학원의 운영방침 및 학사행정에 적극 협조한다.</li>
+                                    <li>교재연구 및 수업을 충실히 하고 수업에 최선을 다한다.</li>
+                                    <li>결근시에는 당월 근무일 수에서 결근일수를 제하고 나머지를 급여로 지급한다.</li>
+                                    <li>무단결근 : 계약해지 대상</li>
+                                    <li>학원의 모든 시설과 물건에 대하여 주인의식을 갖고 철저히 보호한다.</li>
+                                    <li>각 학년에 맞게 진도표를 성실히 작성한다.</li>
+                                </ol>
+                            </section>
+
+                            <section>
+                                <h2 className="font-bold bg-gray-100 inline-block px-2 rounded mb-2">제7조 [퇴직]</h2>
+                                <ol className="list-decimal pl-6 space-y-1">
+                                    <li>퇴직하고자 하는 경우에는 학사행정의 원활과 안정을 위하여 1개월 전에 퇴직의사를 원장에게 보고하여야 한다.</li>
+                                    <li>퇴직 전 원장이 지정한 업무인수자에게 담당업무를 인계하여야 한다.</li>
+                                    <li>퇴직 후 1년 이내에는 주변 학원에서는 근무할 수 없다.</li>
+                                </ol>
+                            </section>
+
+                            <section>
+                                <h2 className="font-bold bg-gray-100 inline-block px-2 rounded mb-2">제8조 [계약해지]</h2>
+                                <p className="pl-2 mb-2">다음과 같은 사유 발생 시 갑은 을의 동의 없이 본 계약을 즉시 해지할 수 있다.</p>
+                                <ol className="list-decimal pl-6 space-y-1">
+                                    <li>교육자로서 지녀야 할 품의와 자격이 실추된 경우</li>
+                                    <li>건강상 재직이 불가능하다고 인정되는 경우</li>
+                                    <li>2회 이상 무단결근한 경우</li>
+                                    <li>강의 평가에 의해 강의 능력이 부족하다고 인정되는 경우</li>
+                                    <li>본 학원이외의 장소에서 본 원생을 대상으로 교습행위를 하는 경우(과외 지도 포함)</li>
+                                </ol>
+                            </section>
+
+                            <section>
+                                <h2 className="font-bold bg-gray-100 inline-block px-2 rounded mb-2">제9조 [기밀유지]</h2>
+                                <p className="pl-2">“을”은 킴스학원에 재직 중 알게 된 모든 정보에 대하여 재직 중, 퇴직 후에라도 제3자에게 알리거나 사용하도록 하여서는 안 된다.</p>
+                            </section>
+
+                            <section>
+                                <h2 className="font-bold bg-gray-100 inline-block px-2 rounded mb-2">제10조 [보관]</h2>
+                                <p className="pl-2">본 계약서는 2부를 작성하여 상호기명 날인하고 “갑”과 “을”이 각 각 1부씩 보관하기로 한다.</p>
+                            </section>
+
+                            <section>
+                                <h2 className="font-bold bg-gray-100 inline-block px-2 rounded mb-2">제11조 [계약의 추완]</h2>
+                                <p className="pl-2">본 계약서에 명시되지 아니한 사항에 대하여 추가로 보완할 사항이 있는 경우에는 “갑” “을” 상호간에 별도의 약정서를 작성하여 첨부하기로 하며 그 효력은 본 계약에 의한 것으로 본다.</p>
+                            </section>
+                        </div>
+                    )}
+                    
+                    <div className="mt-12 mb-8 text-center text-xl font-bold">{dateObj.getFullYear()}년 {dateObj.getMonth() + 1}월 {dateObj.getDate()}일</div>
+                    
+                    <div className="border-t-2 border-gray-800 pt-6 flex flex-col md:flex-row justify-between gap-8">
+                        <div className="flex-1 space-y-2">
+                            <h3 className="font-bold text-lg mb-4">(갑) 학원</h3>
+                            <p className="mb-1"><span className="inline-block w-20 text-gray-600">주소:</span> {data.employerAddress || '광산구 도산로 4-3 2층 킴스학원'}</p>
+                            <div className="flex items-center relative mb-1">
+                                <span className="inline-block w-20 text-gray-600">원장:</span> 
+                                <span className="font-bold text-lg mr-2">{data.employerName}</span> 
+                                <span>(인)</span>
+                                <img src="./KakaoTalk_20260507_144652852.png" alt="학원 직인" className="absolute left-28 -top-4 w-16 h-16 object-contain mix-blend-multiply opacity-90 pointer-events-none" />
+                            </div>
+                        </div>
+
+                        <div className="flex-1 border-t md:border-t-0 md:border-l border-gray-300 pt-6 md:pt-0 md:pl-8 relative pb-28">
+                            <h3 className="font-bold text-lg mb-4">(을) 강사</h3>
+                            <p className="mb-2"><span className="inline-block w-20 text-gray-600">성명:</span> <span className="font-bold text-lg">{data.employeeName}</span></p>
+                            <p className="mb-2"><span className="inline-block w-20 text-gray-600">주민번호:</span> {data.teacherIdNumber || '(서명 시 입력)'}</p>
+                            <p className="mb-2"><span className="inline-block w-20 text-gray-600">주소:</span> {data.teacherAddress || '(서명 시 입력)'}</p>
+                            <p className="mb-2"><span className="inline-block w-20 text-gray-600">계좌번호:</span> {data.teacherBankAccount || '(서명 시 입력)'}</p>
+
+                            <div className="absolute bottom-0 right-0 w-32 h-20 border-2 border-gray-300 rounded overflow-hidden bg-white">
+                                {data.signatureData ? (
+                                    <img src={data.signatureData} className="w-full h-full object-contain mix-blend-multiply" alt="서명" />
+                                ) : (
+                                    <div className="flex items-center justify-center h-full text-gray-400 font-bold">서명란</div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
